@@ -1,5 +1,7 @@
-from simulation import Simulation
 import math
+
+from lib.util import get_traceback
+from simulation import Simulation
 
 
 class Token():
@@ -46,8 +48,32 @@ class Index(Simulation):
             self.indexTokenPerToken.append(
                 self.priceOf(token.symbol) * self.supply / self.totalValueOf())
 
-    def mint(self, index: int, amountIn: float) -> float:
-        targetSupply = self.targetIndexPerBacking(index) * 2
+    def failsafe(f):
+        def decorator(self, index, *args, simulate=False, **kwargs):
+            snapshot = self.createSnapshot(index)
+            result = None
+            try:
+                result = f(self, index, *args, **kwargs)
+                if simulate:
+                    self.restoreSnapshot(snapshot)
+            except Exception as e:
+                print(get_traceback(e))
+                self.restoreSnapshot(snapshot)
+                raise e
+            return result
+        return decorator
+
+    @failsafe
+    def mintUsd(self, index, usd) -> float:
+        amount = usd / self.priceOf(self.tokens[index].symbol)
+        return self.__mint(index, amount) * self.price()
+
+    @failsafe
+    def mint(self, index, amount) -> float:
+        return self.__mint(index, amount)
+
+    def mintAmountOut(self, index, amountIn) -> float:
+        targetSupply = self.targetIndexPerBacking(index)
         if (self.tokens[index].amount > targetSupply):
             # token balance exceeds target amount based on weights
             print("token balance exceeds target amount based on weights")
@@ -60,8 +86,6 @@ class Index(Simulation):
             print("newSupply < self.supply")
             return 0
 
-        self.tokens[index].amount += amountIn
-        self.supply += amountOut
         return amountOut
 
     def targetIndexPerBacking(self, index) -> float:
@@ -73,20 +97,14 @@ class Index(Simulation):
     def currentIndexPerBacking(self, index) -> float:
         return self.__indexPerBacking(index, self.tokens[index].amount)
 
-    def __indexPerBacking(self, index, amount) -> float:
-        """
-        this formula is a function of the index token supply for a particular backing asset based on the amount of tokens in the pool. For 0 index tokens the supply should be 0. The functions converges towards `targetSupply`. The `indexTokenPerToken` is the tangent of the function at the (0,0) point. This ensures that the tokens are minted initially at the correct ratio, should the index token be initialized without and of these tokens.
-        """
-        targetSupply = self.targetIndexPerBacking(index)
-        return targetSupply * \
-            (1 - 1 /
-             (self.indexTokenPerToken[index]*amount/(targetSupply) + 1))
-
     def totalValueOf(self) -> float:
         totalValue = 0
         for token in self.tokens:
             totalValue += token.amount * self.priceOf(token.symbol)
         return totalValue
+
+    def price(self):
+        return self.totalValueOf() / self.supply
 
     def log(self):
         print(f"Index supply: {self.supply}")
@@ -99,3 +117,33 @@ class Index(Simulation):
             f"Index value: ${round(totalValue, 2)}, index price: ${round(totalValue / self.supply, 5)}")
         print()
         return self
+
+    def __mint(self, index: int, amountIn: float) -> float:
+        amountOut = self.mintAmountOut(index, amountIn)
+
+        self.tokens[index].amount += amountIn
+        self.supply += amountOut
+        return amountOut
+
+    def __indexPerBacking(self, index, amount) -> float:
+        """
+        this formula is a function of the index token supply for a particular backing asset based on the amount of tokens in the pool. For 0 index tokens the supply should be 0. The functions converges towards `targetSupply`. The `indexTokenPerToken` is the tangent of the function at the (0,0) point. This ensures that the tokens are minted initially at the correct ratio, should the index token be initialized without and of these tokens.
+        """
+        targetSupply = self.targetIndexPerBacking(index)
+        return targetSupply * \
+            (1 - 1 /
+             (self.indexTokenPerToken[index]*amount/(targetSupply) + 1))
+
+    def createSnapshot(self, index):
+        return {
+            "token": {
+                "index": index,
+                "amount": self.tokens[index].amount
+            },
+            "supply": self.supply,
+        }
+
+    def restoreSnapshot(self, snapshot):
+        self.tokens[snapshot["token"]["index"]
+                    ].amount = snapshot["token"]["amount"]
+        self.supply = snapshot["supply"]
